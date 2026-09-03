@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  agentic-pentest:
+    build: .
+    container_name: ai_pentest_framework
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    # Run the framework. Override this with -t <target>
+    # To run authenticated scans, add --cookie or --header to the command
+    # command: python -m watchtower.main -t https://example.com --cookie "..."
+
