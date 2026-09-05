@@ -195,10 +195,12 @@ def main():
     # ── ValidatorAgent ─────────────────────────────────────
     validator_agent: ValidatorAgent | None = None
     if config.validator_enabled:
+        from watchtower.agents.planner import get_llm
         validator_agent = ValidatorAgent(
-            confidence_threshold=getattr(config, "validator_confidence_threshold", 70)
+            confidence_threshold=getattr(config, "validator_confidence_threshold", 70),
+            llm_client=get_llm(),
         )
-        logger.info("ValidatorAgent initialised.")
+        logger.info("ValidatorAgent initialised with LLM verification.")
 
     # ── Vector memory context ────────────────────────────────────────
     memory_context = memory.get_session_context(args.target)
@@ -250,11 +252,15 @@ def main():
         for node_name, state_updates in event.items():
             logger.info("==> Node Executed: [%s]", node_name.upper())
 
-            # Persist observations to SQLite
+            # Persist observations to SQLite + rich vector memory
             if "observations" in state_updates:
+                clean_res = state_updates.get("clean_result", {})
                 for obs in state_updates["observations"]:
                     memory.log_observation(
-                        obs.get("target"), obs.get("tool"), obs.get("output")
+                        obs.get("target"),
+                        obs.get("tool"),
+                        obs.get("output"),
+                        clean_result=clean_res,
                     )
 
             # Persist validated findings to SQLite

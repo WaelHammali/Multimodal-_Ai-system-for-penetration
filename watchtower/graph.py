@@ -79,8 +79,11 @@ def validator_graph_node(state: AgentState) -> dict:
     """
     Validator node: Independently verifies findings from Analyst.
     """
+    from watchtower.agents.planner import get_llm
+
     validator: ValidatorAgent = state.get("validator_agent") or ValidatorAgent(
-        confidence_threshold=getattr(config, "validator_confidence_threshold", 70)
+        confidence_threshold=getattr(config, "validator_confidence_threshold", 70),
+        llm_client=get_llm(),
     )
     memory: MemoryAgent = state.get("memory_agent")
     session_id = state.get("session_id", "")
