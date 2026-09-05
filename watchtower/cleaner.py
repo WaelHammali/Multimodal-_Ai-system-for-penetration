@@ -21,9 +21,12 @@ _RAW_PREVIEW_MAX = 500
 class CleanerAgent:
     """
     Transforms raw tool output into structured, queryable data.
+    Combines rule-based regex parsers with high-speed LLM cleaning (Groq)
+    to eliminate banners, noise, and ANSI codes before saving to memory.
 
     Key methods:
     - clean(command, tool, raw_output, target, exit_code, duration) -> Dict[str, Any]
+    - _llm_clean(tool, raw_output, target) -> Optional[Dict[str, Any]]
     - _parse_nmap(output, target) -> Dict[str, Any]
     - _parse_gobuster(output, target) -> Dict[str, Any]
     - _parse_sqlmap(output, target) -> Dict[str, Any]
@@ -35,6 +38,71 @@ class CleanerAgent:
     - _extract_vulnerabilities(parsed_data) -> str
     - _extract_directories(parsed_data) -> str
     """
+
+    def __init__(self, use_llm: Optional[bool] = None) -> None:
+        if use_llm is None:
+            try:
+                from watchtower.core.config import config
+                self.use_llm = getattr(config, "cleaner_use_llm", True)
+            except Exception:
+                self.use_llm = True
+        else:
+            self.use_llm = use_llm
+
+    def _format_list(self, item: Any) -> str:
+        if not item:
+            return ""
+        if isinstance(item, list):
+            return ",".join(str(x) for x in item if str(x).strip())
+        return str(item)
+
+    def _llm_clean(self, tool: str, raw_output: str, target: str) -> Optional[Dict[str, Any]]:
+        """
+        Use the LLM brain (e.g. Groq) to parse and distill raw tool logs into structured JSON.
+        """
+        if not raw_output or not raw_output.strip():
+            return None
+
+        try:
+            from watchtower.agents.planner import get_llm
+            from langchain_core.messages import HumanMessage
+
+            llm = get_llm()
+            if llm.__class__.__name__ == "MockLLM":
+                return None
+
+            sample_output = raw_output[:3500]
+            prompt = (
+                f"You are an expert security data cleaner.\n"
+                f"Extract structured security information from the raw output of tool '{tool}' targeting '{target}'.\n"
+                f"Remove terminal ANSI codes, banners, progress bars, and irrelevant verbose logs.\n\n"
+                f"RAW OUTPUT:\n{sample_output}\n\n"
+                f"Output strictly valid JSON with no markdown formatting:\n"
+                f"{{\n"
+                f'  "summary": "1-2 sentence executive summary of key discoveries or none",\n'
+                f'  "open_ports": ["port/service", ...],\n'
+                f'  "vulnerabilities": ["vulnerability name or CVE", ...],\n'
+                f'  "directories": ["/path", ...],\n'
+                f'  "key_data": {{ "extracted_fields": "values" }}\n'
+                f"}}"
+            )
+
+            response = llm.invoke([HumanMessage(content=prompt)])
+            content = getattr(response, "content", response)
+            if isinstance(content, list):
+                content = "".join(str(c) for c in content)
+            content_str = str(content).strip()
+
+            if content_str.startswith("```"):
+                content_str = re.sub(r"^```(?:json)?\n?", "", content_str)
+                content_str = re.sub(r"\n?```$", "", content_str)
+
+            data = json.loads(content_str)
+            logger.info("CleanerAgent: LLM cleaned output for '%s' successfully", tool)
+            return data
+        except Exception as exc:
+            logger.debug("CleanerAgent: LLM clean skipped or failed: %s", exc)
+            return None
 
     def clean(
         self,
@@ -63,18 +131,32 @@ class CleanerAgent:
             "curl": self._parse_curl,
         }
 
-        parser_fn = parsers.get(tool_lower, self._parse_generic)
+        parsed_data = None
+        llm_result = None
 
-        try:
-            parsed_data = parser_fn(raw_output or "", target)
-        except Exception as exc:
-            logger.warning("CleanerAgent: parser for '%s' raised: %s", tool, exc)
-            parsed_data = self._parse_generic(raw_output or "", target)
+        # If LLM cleaning is enabled, use LLM for generic tools or if regex produced no results
+        if self.use_llm and tool_lower not in parsers:
+            llm_result = self._llm_clean(tool, raw_output, target)
 
-        clean_summary = self._generate_summary(parsed_data, tool_lower)
-        open_ports = self._extract_ports(parsed_data)
-        vulnerabilities = self._extract_vulnerabilities(parsed_data)
-        directories = self._extract_directories(parsed_data)
+        if llm_result:
+            parsed_data = llm_result.get("key_data") or llm_result
+            clean_summary = llm_result.get("summary") or self._generate_summary(parsed_data, tool_lower)
+            open_ports = self._format_list(llm_result.get("open_ports"))
+            vulnerabilities = self._format_list(llm_result.get("vulnerabilities"))
+            directories = self._format_list(llm_result.get("directories"))
+        else:
+            parser_fn = parsers.get(tool_lower, self._parse_generic)
+            try:
+                parsed_data = parser_fn(raw_output or "", target)
+            except Exception as exc:
+                logger.warning("CleanerAgent: parser for '%s' raised: %s", tool, exc)
+                parsed_data = self._parse_generic(raw_output or "", target)
+
+            clean_summary = self._generate_summary(parsed_data, tool_lower)
+            open_ports = self._extract_ports(parsed_data)
+            vulnerabilities = self._extract_vulnerabilities(parsed_data)
+            directories = self._extract_directories(parsed_data)
+
         raw_preview = (raw_output or "")[:_RAW_PREVIEW_MAX]
         if len(raw_output or "") > _RAW_PREVIEW_MAX:
             raw_preview += "... (truncated)"

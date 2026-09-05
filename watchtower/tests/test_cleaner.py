@@ -279,3 +279,94 @@ def test_structured_output_is_valid_json(cleaner: CleanerAgent) -> None:
     data = json.loads(result["structured_output"])
     assert isinstance(data, dict)
     assert "open_ports" in data
+
+
+def test_cleaner_format_list() -> None:
+    cleaner = CleanerAgent(use_llm=False)
+    assert cleaner._format_list(["80/tcp", "443/tcp"]) == "80/tcp,443/tcp"
+    assert cleaner._format_list("single_item") == "single_item"
+    assert cleaner._format_list(None) == ""
+    assert cleaner._format_list([]) == ""
+
+
+
+# ── LLM Cleaner Tests ──────────────────────────────────────────────────────────
+
+def test_cleaner_llm_mock_extraction(monkeypatch) -> None:
+    """Test that CleanerAgent properly uses LLM clean response when available."""
+    pytest.importorskip("langchain_core")
+    cleaner = CleanerAgent(use_llm=True)
+
+    class MockResponse:
+        content = json.dumps({
+            "summary": "Discovered critical CVE-2021-41773 path traversal on Apache 2.4.49",
+            "open_ports": ["80/http", "443/https"],
+            "vulnerabilities": ["CVE-2021-41773"],
+            "directories": ["/cgi-bin/.%2e/.%2e/bin/sh"],
+            "key_data": {"severity": "critical", "service": "apache"}
+        })
+
+    class FakeLLM:
+        def invoke(self, messages):
+            return MockResponse()
+
+    monkeypatch.setattr("watchtower.agents.planner.get_llm", lambda: FakeLLM())
+
+    result = cleaner.clean(
+        command="nuclei -t cves/ -u http://target.local",
+        tool="nuclei",
+        raw_output="[CVE-2021-41773] [http] [critical] http://target.local/cgi-bin/.%2e/.%2e/bin/sh",
+        target="http://target.local",
+        exit_code=0,
+        duration=2.5,
+    )
+
+    assert "CVE-2021-41773" in result["clean_summary"]
+    assert "80/http" in result["open_ports"]
+    assert "CVE-2021-41773" in result["vulnerabilities"]
+    assert "/cgi-bin/.%2e/.%2e/bin/sh" in result["directories"]
+
+
+def test_cleaner_llm_fallback_on_error(monkeypatch) -> None:
+    """Test that CleanerAgent cleanly falls back to generic parser if LLM fails."""
+    pytest.importorskip("langchain_core")
+    cleaner = CleanerAgent(use_llm=True)
+
+    class ErrorLLM:
+        def invoke(self, messages):
+            raise RuntimeError("API timeout")
+
+    monkeypatch.setattr("watchtower.agents.planner.get_llm", lambda: ErrorLLM())
+
+    result = cleaner.clean(
+        command="whatweb http://example.com",
+        tool="whatweb",
+        raw_output="WhatWeb report for http://example.com\nTitle: Example Domain\n",
+        target="http://example.com",
+        exit_code=0,
+        duration=1.0,
+    )
+
+    # Should fall back to generic parser gracefully
+    assert result["tool"] == "whatweb"
+    assert "lines" in result["clean_summary"].lower()
+
+
+def test_get_llm_groq_provider(monkeypatch) -> None:
+    """Test that get_llm correctly initializes Groq with GROQ_API_KEY."""
+    pytest.importorskip("langchain_core")
+    pytest.importorskip("langchain_openai")
+    from watchtower.agents.planner import get_llm
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test_mock_key_12345")
+    monkeypatch.setenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("WATCHTOWER_PROVIDER", raising=False)
+
+    llm = get_llm()
+    assert llm.__class__.__name__ == "ChatOpenAI"
+    assert "groq.com" in str(getattr(llm, "openai_api_base", ""))
+    assert getattr(llm, "model_name", "") == "llama-3.3-70b-versatile"
+
