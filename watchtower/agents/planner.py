@@ -50,17 +50,29 @@ class PlannerOutput(BaseModel):
 
 # ── LLM factory ─────────────────────────────────────────────────────────────
 
-def get_llm():
+_llm_singleton: object | None = None  # module-level cache
+
+
+def get_llm(force_new: bool = False):
     """
     Resolve the LLM instance based on environment / config.
 
     Priority order:
       1. WATCHTOWER_PROVIDER (custom provider string or URL)
-      2. OPENROUTER_API_KEY
-      3. OPENAI_API_KEY
-      4. GEMINI_API_KEY
-      5. MockLLM fallback
+      2. GROQ_API_KEY
+      3. OPENROUTER_API_KEY
+      4. OPENAI_API_KEY
+      5. GEMINI_API_KEY
+      6. MockLLM fallback
+
+    The resolved client is cached as a module-level singleton so that
+    every agent node reuses the same object instead of re-instantiating
+    on each of the 25+ graph iterations.
     """
+    global _llm_singleton
+    if _llm_singleton is not None and not force_new:
+        return _llm_singleton
+
     custom_provider = os.getenv("WATCHTOWER_PROVIDER")
     custom_model = os.getenv("WATCHTOWER_MODEL", "gpt-4-turbo")
     apikey_env_name = os.getenv("WATCHTOWER_APIKEY_NAME")
@@ -99,22 +111,23 @@ def get_llm():
             )
         elif provider == "litellm":
             from langchain_community.chat_models import ChatLiteLLM
-            return ChatLiteLLM(model=custom_model, temperature=0, api_key=api_key)
+            _llm_singleton = ChatLiteLLM(model=custom_model, temperature=0, api_key=api_key)
         else:
             try:
                 from langchain.chat_models import init_chat_model
-                return init_chat_model(
+                _llm_singleton = init_chat_model(
                     custom_model, model_provider=provider,
                     temperature=0, api_key=api_key,
                 )
             except Exception:
                 from langchain_community.chat_models import ChatLiteLLM
-                return ChatLiteLLM(model=custom_model, temperature=0, api_key=api_key)
+                _llm_singleton = ChatLiteLLM(model=custom_model, temperature=0, api_key=api_key)
+        return _llm_singleton
 
     if os.getenv("GROQ_API_KEY"):
         from langchain_openai import ChatOpenAI
         model_name = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
-        return ChatOpenAI(
+        _llm_singleton = ChatOpenAI(
             model=model_name,
             temperature=0,
             api_key=os.getenv("GROQ_API_KEY"),
@@ -123,7 +136,7 @@ def get_llm():
     elif os.getenv("OPENROUTER_API_KEY"):
         from langchain_openai import ChatOpenAI
         model_name = os.getenv("OPENROUTER_MODEL_NAME", "anthropic/claude-3-opus")
-        return ChatOpenAI(
+        _llm_singleton = ChatOpenAI(
             model=model_name, temperature=0,
             api_key=os.getenv("OPENROUTER_API_KEY"),
             base_url="https://openrouter.ai/api/v1",
@@ -131,11 +144,11 @@ def get_llm():
     elif os.getenv("OPENAI_API_KEY"):
         from langchain_openai import ChatOpenAI
         model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4-turbo")
-        return ChatOpenAI(model=model_name, temperature=0)
+        _llm_singleton = ChatOpenAI(model=model_name, temperature=0)
     elif os.getenv("GEMINI_API_KEY"):
         from langchain_google_genai import ChatGoogleGenerativeAI
         model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-pro")
-        return ChatGoogleGenerativeAI(model=model_name, temperature=0)
+        _llm_singleton = ChatGoogleGenerativeAI(model=model_name, temperature=0)
     else:
         # ── Mock fallback (no API key configured) ────────────────────
         class MockLLM:
@@ -154,7 +167,8 @@ def get_llm():
                             return schema(validated=[], summary="Mock validator")
                         return schema()
                 return MockInvoker()
-        return MockLLM()
+        _llm_singleton = MockLLM()
+    return _llm_singleton
 
 
 # ── Planner node ─────────────────────────────────────────────────────────────
