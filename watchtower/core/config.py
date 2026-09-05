@@ -57,7 +57,7 @@ class Config:
 
         # ── Memory Configuration ─────────────────────────────────────────
         self.memory_enabled: bool = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
-        self.memory_db_path: str = os.getenv("MEMORY_DB_PATH", "pentest_memory.db")
+        self.memory_db_path: str = os.getenv("MEMORY_DB_PATH", "watchtower_memory.db")
         self.memory_vector_enabled: bool = os.getenv("MEMORY_VECTOR_ENABLED", "true").lower() == "true"
         self.memory_vector_db_path: str = os.getenv("MEMORY_VECTOR_DB_PATH", "watchtower_vectordb")
         self.memory_agent_db_path: str = os.getenv(
