@@ -87,6 +87,16 @@ def get_llm():
                 model=custom_model, temperature=0,
                 api_key=api_key, base_url="https://openrouter.ai/api/v1",
             )
+        elif provider == "groq":
+            from langchain_openai import ChatOpenAI
+            groq_key = api_key or os.getenv("GROQ_API_KEY")
+            groq_model = custom_model if custom_model != "gpt-4-turbo" else os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+            return ChatOpenAI(
+                model=groq_model,
+                temperature=0,
+                api_key=groq_key,
+                base_url="https://api.groq.com/openai/v1",
+            )
         elif provider == "litellm":
             from langchain_community.chat_models import ChatLiteLLM
             return ChatLiteLLM(model=custom_model, temperature=0, api_key=api_key)
@@ -101,7 +111,16 @@ def get_llm():
                 from langchain_community.chat_models import ChatLiteLLM
                 return ChatLiteLLM(model=custom_model, temperature=0, api_key=api_key)
 
-    if os.getenv("OPENROUTER_API_KEY"):
+    if os.getenv("GROQ_API_KEY"):
+        from langchain_openai import ChatOpenAI
+        model_name = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+        return ChatOpenAI(
+            model=model_name,
+            temperature=0,
+            api_key=os.getenv("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1",
+        )
+    elif os.getenv("OPENROUTER_API_KEY"):
         from langchain_openai import ChatOpenAI
         model_name = os.getenv("OPENROUTER_MODEL_NAME", "anthropic/claude-3-opus")
         return ChatOpenAI(

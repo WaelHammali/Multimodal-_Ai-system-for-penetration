@@ -33,6 +33,8 @@ class Config:
         self._initialized = True
 
         # ── LLM Configuration ────────────────────────────────────────────
+        self.groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+        self.groq_model: str = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
         self.openai_model: str = os.getenv("OPENAI_MODEL_NAME", "gpt-4-turbo")
         self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -71,6 +73,7 @@ class Config:
 
         # ── Cleaner Configuration ────────────────────────────────────────
         self.cleaner_enabled: bool = os.getenv("CLEANER_ENABLED", "true").lower() == "true"
+        self.cleaner_use_llm: bool = os.getenv("CLEANER_USE_LLM", "true").lower() == "true"
         self.cleaner_store_raw: bool = (
             os.getenv("CLEANER_STORE_RAW", "false").lower() == "true"
         )
