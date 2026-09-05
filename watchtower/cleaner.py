@@ -56,6 +56,55 @@ class CleanerAgent:
             return ",".join(str(x) for x in item if str(x).strip())
         return str(item)
 
+    def _prefilter_output(self, raw_output: str, tool: str) -> str:
+        """
+        Pre-filter raw output to extract only meaningful lines.
+        Removes noise (404, banner repeats, debug spam) and keeps signal (200 OK, open, vulnerable).
+        """
+        if not raw_output:
+            return ""
+
+        tool_lower = (tool or "").lower().strip()
+        lines = raw_output.splitlines()
+        filtered_lines = []
+
+        if tool_lower in ("gobuster", "ffuf", "httpx", "dirsearch"):
+            keep_patterns = [
+                r"Status:\s*(?:200|201|204|301|302|307|308|401|403|500)",
+                r"\[(?:200|201|204|301|302|307|308|401|403|500)\]",
+                r"http[s]?://",
+            ]
+            for line in lines:
+                if any(re.search(p, line, re.IGNORECASE) for p in keep_patterns):
+                    filtered_lines.append(line)
+
+        elif tool_lower in ("nmap", "masscan"):
+            for line in lines:
+                line_lower = line.lower()
+                if any(k in line_lower for k in ("open", "filtered", "host is up", "os details")):
+                    filtered_lines.append(line)
+
+        elif tool_lower in ("sqlmap", "nuclei", "nikto", "wpscan", "dalfox", "xsstrike"):
+            for line in lines:
+                line_lower = line.lower()
+                if any(kw in line_lower for kw in ("vulnerable", "parameter", "database", "critical", "high", "medium", "cve-", "exploit", "target:")):
+                    filtered_lines.append(line)
+
+        # Fallback if no specific filter applied or no lines matched
+        if not filtered_lines:
+            filtered_lines = [
+                line for line in lines
+                if not re.search(r"Status:\s*404|\[404\]|file not found", line, re.IGNORECASE)
+            ]
+
+        if not filtered_lines:
+            return raw_output[:3500]
+
+        filtered_text = "\n".join(filtered_lines)
+        if len(filtered_text) > 3500:
+            filtered_text = filtered_text[:3500] + "... (filtered & truncated)"
+        return filtered_text
+
     def _llm_clean(self, tool: str, raw_output: str, target: str) -> Optional[Dict[str, Any]]:
         """
         Use the LLM brain (e.g. Groq) to parse and distill raw tool logs into structured JSON.
@@ -71,7 +120,7 @@ class CleanerAgent:
             if llm.__class__.__name__ == "MockLLM":
                 return None
 
-            sample_output = raw_output[:3500]
+            sample_output = self._prefilter_output(raw_output, tool)
             prompt = (
                 f"You are an expert security data cleaner.\n"
                 f"Extract structured security information from the raw output of tool '{tool}' targeting '{target}'.\n"
