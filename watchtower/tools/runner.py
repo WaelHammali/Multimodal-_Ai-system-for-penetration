@@ -10,10 +10,25 @@ def run_cli_tool(
     command: List[str],
     timeout: int = 300,
     auth_metadata: Optional[Dict[str, Any]] = None,
+    **kwargs,
 ) -> str:
     """
-    Executes a CLI tool safely with timeout, auth injection, and smart truncation.
+    Executes a CLI tool safely with timeout, argument sanitization, auth injection, and smart truncation.
     """
+    if "timeout" in kwargs and kwargs["timeout"]:
+        try:
+            timeout = int(kwargs["timeout"])
+        except (ValueError, TypeError):
+            pass
+
+    # Guard against command injection and control characters
+    dangerous_chars = [";", "&", "|", "`", "$", "\x00", "\n", "\r"]
+    for arg in command:
+        if any(c in arg for c in dangerous_chars):
+            err_msg = f"Command argument validation failed: prohibited character detected in '{arg}'"
+            logger.error(err_msg)
+            return f"Error executing tool: {err_msg}"
+
     # Inject auth headers/cookies if provided
     if auth_metadata:
         for key, val in auth_metadata.items():

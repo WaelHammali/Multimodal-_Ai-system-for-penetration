@@ -35,7 +35,7 @@ def _run_single_tool(
     """
     try:
         tool_module = importlib.import_module(f"watchtower.tools.{tool_name}")
-        raw_output = tool_module.run(target, auth_metadata=auth_metadata)
+        raw_output = tool_module.run(target, auth_metadata=auth_metadata, timeout=timeout)
     except Exception as exc:
         raw_output = f"Error running {tool_name}: {exc}"
         logger.error("Worker — tool '%s' failed: %s", tool_name, exc)

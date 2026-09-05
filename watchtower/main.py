@@ -126,8 +126,11 @@ def main():
         logger.error("The -t/--target argument is required unless generating a report.")
         sys.exit(1)
 
-    if not validate_target(args.target):
-        logger.error("Invalid target: %s — must be a valid URL or IP address.", args.target)
+    try:
+        from watchtower.core.guardrails import sanitize_target
+        args.target = sanitize_target(args.target)
+    except ValueError as val_err:
+        logger.error("Invalid or unsafe target: %s", val_err)
         sys.exit(1)
 
     logger.info("Initializing Watchtower AI Pentesting Framework...")
