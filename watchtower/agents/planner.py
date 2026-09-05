@@ -47,6 +47,10 @@ class PlannerOutput(BaseModel):
             "the tool to re-run. Otherwise null."
         ),
     )
+    current_phase: Optional[str] = Field(
+        default=None,
+        description="The active pentest phase: 'recon', 'scan', 'exploit', 'validate', or 'report'.",
+    )
 
 
 # ── LLM factory ─────────────────────────────────────────────────────────────
@@ -307,12 +311,39 @@ Do not repeat tools unnecessarily. Ensure parallel tools don't conflict.
             except Exception as mem_exc:
                 logger.warning("Planner: failed to log memory step: %s", mem_exc)
 
-        return {
+        old_phase = state.get("current_phase", "recon")
+        new_phase = result.current_phase
+        if not new_phase or new_phase.lower() not in {"recon", "scan", "exploit", "validate", "report"}:
+            if result.is_finished:
+                new_phase = "report"
+            elif any(t in str(chosen_step).lower() for t in ["sqlmap", "commix", "metasploit"]):
+                new_phase = "exploit"
+            elif any(t in str(chosen_step).lower() for t in ["nuclei", "nikto", "zap", "dalfox", "xsstrike"]):
+                new_phase = "scan"
+            elif any(t in str(chosen_step).lower() for t in ["subfinder", "amass", "nmap", "masscan", "httpx", "whatweb", "wafw00f"]):
+                new_phase = "recon"
+            else:
+                new_phase = old_phase
+        else:
+            new_phase = new_phase.lower()
+
+        ret = {
             "current_plan": result.current_plan,
             "next_step": chosen_step,
             "is_finished": result.is_finished,
             "iteration_count": iteration + 1,
+            "current_phase": new_phase,
         }
+        if new_phase != old_phase:
+            ret["phase_history"] = [{
+                "from_phase": old_phase,
+                "to_phase": new_phase,
+                "iteration": iteration + 1,
+                "reason": result.current_plan[:100],
+            }]
+            logger.info("Planner: Phase transitioned from '%s' to '%s'", old_phase, new_phase)
+
+        return ret
     except Exception as e:
         logger.error("Planner error: %s", e)
         return {
