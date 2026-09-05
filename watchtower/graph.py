@@ -1,35 +1,48 @@
 """
-LangGraph orchestration for the 5-Agent Architecture.
+LangGraph orchestration for the 6-Agent Architecture.
 
 Topology:
-  Planner ──▶ Worker ──▶ Cleaner ──▶ Analyst ──▶ Validator ──┐
-     ▲                                                         │
-     │      ┌───────────────────┬───────────────────┬──────────┘
-     │      ▼                   ▼                   ▼          ▼
-     │  (confirmed)     (false_positive)     (inconclusive) (error)
-     │      │                   │                   │          │
-     │      ▼                   ▼                   ▼          │
-     └── Reporter            Discard            Analyst        │
-            │                   │                              │
-            └───────────────────┴──────────────────────────────┘
+  Planner ──▶ Worker ──▶ Cleaner ──▶ Analyst ──┐
+     ▲                                          │
+     │                           (recon tool?)  │
+     │                                          ├──▶ Logic Analysis ──┐
+     │                                          │                     │
+     │                                          └──────────────────── ▼
+     │                                                          Validator ──┐
+     │      ┌──────────────────┬──────────────────┬─────────────────────────┘
+     │      ▼                  ▼                  ▼                ▼
+     │  (confirmed)    (false_positive)     (needs_retest)      (error)
+     │      │                  │                  │                │
+     │      ▼                  ▼                  ▼                │
+     └── Reporter           Discard            Planner ────────────┘
+            │                  │
+            └──────────────────┴──▶ Planner (loop)
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 from langgraph.graph import StateGraph, END
 
 from watchtower.core.state import AgentState
 from watchtower.cleaner import CleanerAgent
 from watchtower.memory import MemoryAgent
-from watchtower.validator import ValidatorAgent, VerificationStatus
 from watchtower.agents.planner import planner_node
 from watchtower.agents.worker import worker_node
 from watchtower.agents.analyst import analyst_node
+from watchtower.agents.validator import validator_node          # ← real validator
+from watchtower.agents.logic_analysis import logic_analysis_node  # ← IDOR analysis
 from watchtower.core.config import config
 
 logger = logging.getLogger(__name__)
 
+# Tools that trigger the IDOR / business-logic analysis step
+_LOGIC_ANALYSIS_TOOLS: Set[str] = {"httpx", "kiterunner", "arjun", "gobuster", "ffuf"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cleaner node (lives here because it glues Worker ↔ MemoryAgent)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def cleaner_node(state: AgentState) -> dict:
     """
@@ -75,81 +88,9 @@ def cleaner_node(state: AgentState) -> dict:
     }
 
 
-def validator_graph_node(state: AgentState) -> dict:
-    """
-    Validator node: Independently verifies findings from Analyst.
-    """
-    from watchtower.agents.planner import get_llm
-
-    validator: ValidatorAgent = state.get("validator_agent") or ValidatorAgent(
-        confidence_threshold=getattr(config, "validator_confidence_threshold", 70),
-        llm_client=get_llm(),
-    )
-    memory: MemoryAgent = state.get("memory_agent")
-    session_id = state.get("session_id", "")
-    findings = state.get("findings", [])
-
-    already_validated = {f.get("title") for f in state.get("validated_findings", [])}
-    already_rejected = {f.get("title") for f in state.get("rejected_findings", [])}
-    pending = [f for f in findings if f.get("title") not in (already_validated | already_rejected)]
-
-    if not pending:
-        return {"validation_status": "confirmed"}
-
-    validation_results = validator.validate_batch(pending)
-
-    confirmed: List[Dict[str, Any]] = []
-    rejected: List[Dict[str, Any]] = []
-    inconclusive: List[Dict[str, Any]] = []
-    errors: List[Dict[str, Any]] = []
-
-    for f, res in zip(pending, validation_results):
-        enriched = {
-            **f,
-            "status": res.status.value,
-            "confidence": res.confidence_score,
-            "evidence": res.evidence,
-            "remediation": res.remediation_note,
-        }
-
-        if memory:
-            memory.update_finding_validation(
-                finding_id=res.finding_id,
-                validated=(res.status == VerificationStatus.CONFIRMED),
-                confidence=res.confidence_score,
-                evidence=res.evidence,
-                remediation=res.remediation_note or "",
-            )
-
-        if res.status == VerificationStatus.CONFIRMED:
-            confirmed.append(enriched)
-        elif res.status == VerificationStatus.FALSE_POSITIVE:
-            rejected.append(enriched)
-        elif res.status == VerificationStatus.INCONCLUSIVE:
-            inconclusive.append(enriched)
-        else:
-            errors.append(enriched)
-
-    # Determine dominant transition branch
-    if errors:
-        branch = "error"
-    elif inconclusive and not confirmed:
-        branch = "inconclusive"
-    elif confirmed:
-        branch = "confirmed"
-    else:
-        branch = "false_positive"
-
-    return {
-        "validated_findings": confirmed,
-        "rejected_findings": rejected,
-        "validation_status": branch,
-        "messages": [
-            f"Validator: {len(confirmed)} confirmed, {len(rejected)} rejected, "
-            f"{len(inconclusive)} inconclusive, {len(errors)} errors."
-        ],
-    }
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Reporter / Discard nodes
+# ─────────────────────────────────────────────────────────────────────────────
 
 def reporter_node(state: AgentState) -> dict:
     """Reporter node: Aggregates validated findings for reporting."""
@@ -169,6 +110,10 @@ def discard_node(state: AgentState) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Conditional routers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _planner_router(state: AgentState) -> str:
     """Route after Planner."""
     iteration = state.get("iteration_count", 0)
@@ -182,65 +127,115 @@ def _planner_router(state: AgentState) -> str:
     return "worker"
 
 
+def _analyst_router(state: AgentState) -> str:
+    """
+    After Analyst: run Logic Analysis when the last tool was a recon tool
+    that commonly exposes IDOR/business-logic endpoints; otherwise go
+    directly to the Validator.
+    """
+    observations = state.get("observations", [])
+    if observations:
+        last_tool = observations[-1].get("tool", "")
+        if last_tool in _LOGIC_ANALYSIS_TOOLS:
+            logger.debug("Graph: routing Analyst → Logic Analysis (tool=%s)", last_tool)
+            return "logic_analysis"
+    return "validator"
+
+
 def _validator_router(state: AgentState) -> str:
     """
-    Conditional edge from Validator:
-      confirmed → reporter
+    Conditional edge from Validator.
+
+    The agents/validator.py node returns `retest_requests` when a finding
+    needs a follow-up scan.  Derive routing from the actual state lists so
+    we don't depend on a `validation_status` string being set correctly.
+
+      confirmed    → reporter
+      needs_retest → planner  (schedule follow-up)
       false_positive → discard
-      inconclusive → analyst (re-analyze)
-      error → planner (re-plan)
+      error / nothing new → reporter (safe default)
     """
-    status = state.get("validation_status", "confirmed")
+    validated = state.get("validated_findings", [])
+    rejected = state.get("rejected_findings", [])
+    retests = state.get("retest_requests", [])
+    errors = state.get("error_log", [])
+
+    # Explicit status string (backward-compat with tests)
+    status = state.get("validation_status", "")
     if status == "confirmed":
         return "reporter"
-    elif status == "false_positive":
+    if status == "false_positive":
         return "discard"
-    elif status == "inconclusive":
-        return "analyst"
-    elif status == "error":
+    if status in ("inconclusive", "error"):
         return "planner"
+
+    # Derive from state lists
+    if retests:
+        return "planner"
+    if validated:
+        return "reporter"
+    if rejected and not validated:
+        return "discard"
     return "reporter"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Graph factory
+# ─────────────────────────────────────────────────────────────────────────────
+
 def create_agent_graph():
     """
-    Build and compile the 5-Agent LangGraph state machine.
+    Build and compile the 6-Agent LangGraph state machine.
+
+    Agents:
+      planner, worker, cleaner, analyst, logic_analysis, validator,
+      reporter, discard
     """
     graph = StateGraph(AgentState)
 
-    # Add nodes
+    # ── Add nodes ────────────────────────────────────────────────────
     graph.add_node("planner", planner_node)
     graph.add_node("worker", worker_node)
     graph.add_node("cleaner", cleaner_node)
     graph.add_node("analyst", analyst_node)
-    graph.add_node("validator", validator_graph_node)
+    graph.add_node("logic_analysis", logic_analysis_node)   # IDOR / business logic
+    graph.add_node("validator", validator_node)              # full LLM validator
     graph.add_node("reporter", reporter_node)
     graph.add_node("discard", discard_node)
 
-    # Set entry point
+    # ── Entry point ──────────────────────────────────────────────────
     graph.set_entry_point("planner")
 
-    # Conditional planner routing
+    # ── Edges ────────────────────────────────────────────────────────
+    # Planner routing (finish or continue)
     graph.add_conditional_edges("planner", _planner_router)
 
-    # Worker -> Cleaner -> Analyst -> Validator pipeline
+    # Core pipeline
     graph.add_edge("worker", "cleaner")
     graph.add_edge("cleaner", "analyst")
-    graph.add_edge("analyst", "validator")
 
-    # Conditional validator routing
+    # Analyst → logic_analysis (recon tools) OR directly to validator
+    graph.add_conditional_edges(
+        "analyst",
+        _analyst_router,
+        {"logic_analysis": "logic_analysis", "validator": "validator"},
+    )
+
+    # Logic analysis always feeds into the validator
+    graph.add_edge("logic_analysis", "validator")
+
+    # Validator conditional routing
     graph.add_conditional_edges(
         "validator",
         _validator_router,
         {
             "reporter": "reporter",
             "discard": "discard",
-            "analyst": "analyst",
             "planner": "planner",
         },
     )
 
-    # Loop back to planner
+    # Loop back to planner after reporting / discarding
     graph.add_edge("reporter", "planner")
     graph.add_edge("discard", "planner")
 
