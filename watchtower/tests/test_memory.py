@@ -262,3 +262,37 @@ def test_close_does_not_raise(mem: MemoryAgent) -> None:
 def test_repr(mem: MemoryAgent) -> None:
     r = repr(mem)
     assert "MemoryAgent" in r
+
+
+def test_log_observation_and_retrieve(mem: MemoryAgent) -> None:
+    """Test log_observation and get_all_observations on MemoryAgent."""
+    mem.log_observation(
+        target="192.168.1.50",
+        tool="nmap",
+        output="22/tcp open ssh\n80/tcp open http",
+        clean_result={"clean_summary": "Found 2 open ports: 22, 80", "structured_output": "{}"},
+    )
+    obs = mem.get_all_observations()
+    assert len(obs) == 1
+    assert obs[0][0] == "nmap"
+    assert "22/tcp" in obs[0][1]
+
+
+def test_semantic_search_with_mock_chroma(mem: MemoryAgent) -> None:
+    """Test semantic_search routing through ChromaDB collection."""
+    mock_collection = MagicMock()
+    mock_collection.query.return_value = {
+        "documents": [["Worker: Ran nmap scan — ports open"]],
+        "metadatas": [[{"agent": "Worker", "action": "scan", "timestamp": "2026-09-05T00:00:00"}]],
+        "distances": [[0.15]],
+        "ids": [["mem-1234"]],
+    }
+    mem._chroma_collection = mock_collection
+
+    results = mem.semantic_search("nmap ports", limit=3)
+    assert len(results) == 1
+    assert results[0]["id"] == "mem-1234"
+    assert results[0]["agent"] == "Worker"
+    assert results[0]["score"] == 0.85
+    mock_collection.query.assert_called_once()
+

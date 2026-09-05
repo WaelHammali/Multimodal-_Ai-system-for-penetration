@@ -289,6 +289,37 @@ def test_cleaner_format_list() -> None:
     assert cleaner._format_list([]) == ""
 
 
+def test_cleaner_prefilter_output() -> None:
+    cleaner = CleanerAgent(use_llm=False)
+    # Test gobuster output with 404 noise and 200 OK signal
+    raw_gobuster = (
+        "Progress: 1000/1000\n"
+        "/notfound1 (Status: 404)\n"
+        "/notfound2 (Status: 404)\n"
+        "/admin (Status: 200) [Size: 1234]\n"
+        "/login (Status: 301) [Size: 456]\n"
+    )
+    filtered = cleaner._prefilter_output(raw_gobuster, "gobuster")
+    assert "/admin (Status: 200)" in filtered
+    assert "/login (Status: 301)" in filtered
+    assert "notfound" not in filtered
+
+    # Test nmap output filtering
+    raw_nmap = (
+        "Starting Nmap...\n"
+        "Initiating ARP Ping...\n"
+        "Host is up (0.001s latency).\n"
+        "22/tcp open ssh\n"
+        "80/tcp open http\n"
+        "999/tcp closed unknown\n"
+        "Nmap done.\n"
+    )
+    filtered_nmap = cleaner._prefilter_output(raw_nmap, "nmap")
+    assert "22/tcp open ssh" in filtered_nmap
+    assert "80/tcp open http" in filtered_nmap
+    assert "closed" not in filtered_nmap
+
+
 
 # ── LLM Cleaner Tests ──────────────────────────────────────────────────────────
 
