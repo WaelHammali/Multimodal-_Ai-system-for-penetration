@@ -23,6 +23,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from watchtower.core.state import AgentState
 from watchtower.agents.planner import get_llm
+from watchtower.core.llm_utils import invoke_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ against the raw tool observations below and assign a verdict.
     try:
         llm = get_llm()
         chain = llm | parser
-        result: ValidatorOutput = chain.invoke(messages)
+        result: ValidatorOutput = invoke_with_retry(chain, messages)
 
         confirmed = []
         rejected = []

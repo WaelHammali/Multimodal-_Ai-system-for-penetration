@@ -20,6 +20,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 
 from watchtower.core.state import AgentState
+from watchtower.core.llm_utils import invoke_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,13 @@ def get_llm(force_new: bool = False):
     """
     global _llm_singleton
     if _llm_singleton is not None and not force_new:
-        return _llm_singleton
+        if _llm_singleton.__class__.__name__ == "MockLLM":
+            if any(os.getenv(k) for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "WATCHTOWER_PROVIDER")):
+                _llm_singleton = None
+            else:
+                return _llm_singleton
+        else:
+            return _llm_singleton
 
     custom_provider = os.getenv("WATCHTOWER_PROVIDER")
     custom_model = os.getenv("WATCHTOWER_MODEL", "gpt-4-turbo")
@@ -262,7 +269,7 @@ Do not repeat tools unnecessarily. Ensure parallel tools don't conflict.
     llm = get_llm()
     try:
         chain = llm | parser
-        result = chain.invoke([HumanMessage(content=prompt)])
+        result = invoke_with_retry(chain, [HumanMessage(content=prompt)])
 
         chosen_step = result.retry_tool if result.retry_tool else result.next_step
 

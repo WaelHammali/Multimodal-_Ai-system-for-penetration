@@ -5,6 +5,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from watchtower.core.state import AgentState
 from watchtower.agents.planner import get_llm
+from watchtower.core.llm_utils import invoke_with_retry
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ def logic_analysis_node(state: AgentState) -> dict:
     try:
         llm = get_llm()
         chain = llm | parser
-        result: IDORReasoningOutput = chain.invoke(messages)
+        result: IDORReasoningOutput = invoke_with_retry(chain, messages)
 
         finding = _build_finding(result)
         existing_findings: list = state.get("findings", [])

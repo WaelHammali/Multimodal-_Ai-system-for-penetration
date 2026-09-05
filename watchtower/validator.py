@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from watchtower.core.llm_utils import invoke_with_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -235,7 +237,10 @@ class ValidatorAgent:
         )
 
         try:
-            response = self.llm_client.invoke(prompt) if hasattr(self.llm_client, "invoke") else str(self.llm_client)
+            if hasattr(self.llm_client, "invoke"):
+                response = invoke_with_retry(self.llm_client, prompt)
+            else:
+                response = str(self.llm_client)
             resp_str = str(getattr(response, "content", response)).lower()
 
             if "false_positive" in resp_str or "false positive" in resp_str:

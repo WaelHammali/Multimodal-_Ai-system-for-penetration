@@ -12,6 +12,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from watchtower.core.llm_utils import invoke_with_retry
+
 logger = logging.getLogger(__name__)
 
 # Maximum characters of raw output to keep as preview
@@ -136,7 +138,7 @@ class CleanerAgent:
                 f"}}"
             )
 
-            response = llm.invoke([HumanMessage(content=prompt)])
+            response = invoke_with_retry(llm, [HumanMessage(content=prompt)])
             content = getattr(response, "content", response)
             if isinstance(content, list):
                 content = "".join(str(c) for c in content)

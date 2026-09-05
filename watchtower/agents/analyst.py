@@ -16,6 +16,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from watchtower.core.state import AgentState
 from watchtower.agents.planner import get_llm
+from watchtower.core.llm_utils import invoke_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ NEVER fabricate findings not supported by the data above.
     try:
         llm = get_llm()
         chain = llm | parser
-        result = chain.invoke([HumanMessage(content=prompt)])
+        result = invoke_with_retry(chain, [HumanMessage(content=prompt)])
         new_findings = [f.model_dump() for f in result.findings]
 
         # ── Persist findings in MemoryAgent ───────────────────────────
