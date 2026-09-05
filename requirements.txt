@@ -22,3 +22,4 @@ litellm>=1.0.0
 # Pipeline enhancements
 sentence-transformers>=2.2.0
 numpy>=1.24.0
+tenacity>=8.2.0

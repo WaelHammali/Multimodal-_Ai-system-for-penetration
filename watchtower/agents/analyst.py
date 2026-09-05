@@ -47,20 +47,46 @@ def analyst_node(state: AgentState) -> dict:
 
     new_obs = observations[-1] if isinstance(observations, list) and observations else {}
 
+    # Prefer the Cleaner's structured result — it has already stripped noise and
+    # extracted key fields.  Fall back to raw output only when clean_result is absent.
+    clean_result: dict = new_obs.get("clean_result", {})
+    clean_summary = clean_result.get("clean_summary", "")
+    structured_output = clean_result.get("structured_output", "")
+    open_ports = clean_result.get("open_ports", "")
+    vulnerabilities = clean_result.get("vulnerabilities", "")
+    directories = clean_result.get("directories", "")
+
+    if clean_result and (clean_summary or structured_output):
+        analysis_input = (
+            f"Cleaner Structured Output (primary input — noise already removed):\n"
+            f"  Summary    : {clean_summary}\n"
+            f"  Open Ports : {open_ports}\n"
+            f"  Vulns Found: {vulnerabilities}\n"
+            f"  Directories: {directories}\n"
+            f"  Structured : {structured_output}\n"
+        )
+    else:
+        raw = new_obs.get("output", "") or ""
+        analysis_input = (
+            f"Raw Output (fallback — Cleaner produced no structured result):\n"
+            f"{raw[:3000]}"
+            + ("\n...[TRUNCATED]" if len(raw) > 3000 else "")
+        )
+
     parser = PydanticOutputParser(pydantic_object=AnalystOutput)
 
     prompt = f"""
-You are an expert Security Analyst. Review the raw output from the automated security tools.
+You are an expert Security Analyst. Review the output from the automated security tool below.
 Your goal is to identify genuine security vulnerabilities or interesting misconfigurations.
 
 Tool Execution Details:
-Target: {new_obs.get('target', 'Unknown')}
-Tool Used: {new_obs.get('tool', 'Unknown')}
+  Target  : {new_obs.get('target', 'Unknown')}
+  Tool    : {new_obs.get('tool', 'Unknown')}
 
-Raw Output:
-{new_obs.get('output', 'None')}
+{analysis_input}
 
-Extract any true findings as structured data. If the output contains only normal behavior, return an empty list.
+Extract any TRUE findings as structured data. If the output shows only normal behaviour, return an empty list.
+NEVER fabricate findings not supported by the data above.
 {parser.get_format_instructions()}
 """
 
