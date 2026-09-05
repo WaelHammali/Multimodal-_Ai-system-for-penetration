@@ -94,8 +94,16 @@ NEVER fabricate findings not supported by the data above.
     try:
         llm = get_llm()
         chain = llm | parser
-        result = invoke_with_retry(chain, [HumanMessage(content=prompt)])
-        new_findings = [f.model_dump() for f in result.findings]
+        raw_new_findings = [f.model_dump() for f in result.findings]
+        existing_titles = {
+            f.get("title", "").strip().lower()
+            for f in state.get("findings", [])
+            if f.get("title")
+        }
+        new_findings = [
+            f for f in raw_new_findings
+            if f.get("title", "").strip().lower() not in existing_titles
+        ]
 
         # ── Persist findings in MemoryAgent ───────────────────────────
         if memory and new_findings:

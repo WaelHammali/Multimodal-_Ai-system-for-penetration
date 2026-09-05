@@ -275,7 +275,7 @@ Do not repeat tools unnecessarily. Ensure parallel tools don't conflict.
 
         # ── RAG Fallback if no action planned ────────────────────────
         if (not chosen_step or chosen_step == "finish") and not result.is_finished and memory:
-            last_finding = findings[-1] if findings else None
+            last_finding = validated[-1] if validated else (findings[-1] if findings else None)
             if last_finding:
                 rag_query = last_finding.get("type") or last_finding.get("title") or ""
                 rag_results = memory.semantic_search(rag_query, limit=3)
