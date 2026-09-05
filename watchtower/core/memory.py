@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 # ── Optional ChromaDB import ────────────────────────────────────────────────
 try:
     import chromadb
-    from chromadb.config import Settings as ChromaSettings
 
     _CHROMA_AVAILABLE = True
 except ImportError:
@@ -46,13 +45,7 @@ class VectorMemory:
             return
 
         try:
-            self._client = chromadb.Client(
-                ChromaSettings(
-                    chroma_db_impl="duckdb+parquet",
-                    persist_directory=persist_directory,
-                    anonymized_telemetry=False,
-                )
-            )
+            self._client = chromadb.PersistentClient(path=persist_directory)
             self._collection = self._client.get_or_create_collection(
                 name="watchtower_findings",
                 metadata={"hnsw:space": "cosine"},
@@ -138,7 +131,7 @@ class MemoryStore:
 
     def __init__(
         self,
-        db_path: str = "pentest_memory.db",
+        db_path: str = "watchtower_memory.db",
         session_id: Optional[str] = None,
         vector_enabled: bool = True,
         vector_db_path: str = "watchtower_vectordb",
@@ -191,6 +184,8 @@ class MemoryStore:
         target: Optional[str],
         tool: Optional[str],
         output: Optional[str],
+        clean_result: Optional[Dict[str, Any]] = None,
+        embedding_text: Optional[str] = None,
     ) -> None:
         self.cursor.execute(
             "INSERT INTO observations (session_id, target, tool, output) VALUES (?, ?, ?, ?)",
@@ -198,12 +193,23 @@ class MemoryStore:
         )
         self.conn.commit()
 
-        # Also store in vector memory for cross-session search
-        if self.vector.available and output:
-            self.vector.store_embedding(
-                text=output[:500],
-                metadata={"target": target or "", "tool": tool or "", "type": "observation"},
-            )
+        # Store in vector memory for cross-session search using rich clean summary
+        if self.vector.available:
+            text_to_embed = ""
+            if embedding_text:
+                text_to_embed = embedding_text
+            elif clean_result:
+                summary = clean_result.get("clean_summary", "")
+                structured = clean_result.get("structured_output", "")
+                text_to_embed = f"{summary} {structured}".strip()
+            elif output:
+                text_to_embed = output[:1000]
+
+            if text_to_embed:
+                self.vector.store_embedding(
+                    text=text_to_embed,
+                    metadata={"target": target or "", "tool": tool or "", "type": "observation"},
+                )
 
     # ── Findings ─────────────────────────────────────────────────────────
 
@@ -241,30 +247,92 @@ class MemoryStore:
     # ── Queries ──────────────────────────────────────────────────────────
 
     def get_all_observations(self) -> List[Tuple]:
-        self.cursor.execute("SELECT tool, output FROM observations ORDER BY created_at")
-        return self.cursor.fetchall()
+        try:
+            self.cursor.execute("SELECT tool, output FROM observations ORDER BY id")
+            return self.cursor.fetchall()
+        except Exception:
+            return []
 
     def get_all_findings(self) -> List[Tuple]:
-        self.cursor.execute(
-            "SELECT target, vulnerability, details FROM findings ORDER BY created_at"
-        )
-        return self.cursor.fetchall()
+        try:
+            self.cursor.execute("PRAGMA table_info(findings)")
+            cols = {row[1] for row in self.cursor.fetchall()}
+            if "details" in cols:
+                self.cursor.execute(
+                    "SELECT target, vulnerability, details FROM findings ORDER BY id"
+                )
+                return self.cursor.fetchall()
+            elif "raw_data" in cols:
+                self.cursor.execute(
+                    "SELECT target, finding_type, raw_data FROM findings ORDER BY id"
+                )
+                rows = self.cursor.fetchall()
+                results = []
+                for target, f_type, raw in rows:
+                    title = f_type
+                    try:
+                        parsed = json.loads(raw) if isinstance(raw, str) else raw
+                        title = parsed.get("title") or parsed.get("vulnerability") or f_type
+                    except Exception:
+                        pass
+                    results.append((target, title, raw))
+                return results
+            return []
+        except Exception as exc:
+            logger.warning("MemoryStore: get_all_findings failed: %s", exc)
+            return []
 
     def get_validated_findings(self) -> List[Tuple]:
-        self.cursor.execute(
-            "SELECT target, vulnerability, details, severity, cvss_score "
-            "FROM findings WHERE validated = 1 ORDER BY cvss_score DESC"
-        )
-        return self.cursor.fetchall()
+        try:
+            self.cursor.execute("PRAGMA table_info(findings)")
+            cols = {row[1] for row in self.cursor.fetchall()}
+            if "details" in cols:
+                self.cursor.execute(
+                    "SELECT target, vulnerability, details, severity, cvss_score "
+                    "FROM findings WHERE validated = 1 ORDER BY id"
+                )
+                return self.cursor.fetchall()
+            elif "raw_data" in cols:
+                self.cursor.execute(
+                    "SELECT target, finding_type, raw_data, confidence "
+                    "FROM findings WHERE validated = 1 ORDER BY id"
+                )
+                rows = self.cursor.fetchall()
+                results = []
+                for target, f_type, raw, conf in rows:
+                    title = f_type
+                    details_str = raw
+                    sev = "Unknown"
+                    try:
+                        parsed = json.loads(raw) if isinstance(raw, str) else raw
+                        title = parsed.get("title") or f_type
+                        sev = parsed.get("severity") or "Unknown"
+                    except Exception:
+                        pass
+                    results.append((target, title, details_str, sev, float(conf or 0)))
+                return results
+            return []
+        except Exception as exc:
+            logger.warning("MemoryStore: get_validated_findings failed: %s", exc)
+            return []
 
     def get_session_findings(self, session_id: Optional[str] = None) -> List[Tuple]:
         sid = session_id or self.session_id
-        self.cursor.execute(
-            "SELECT target, vulnerability, details, severity, cvss_score "
-            "FROM findings WHERE session_id = ? ORDER BY created_at",
-            (sid,),
-        )
-        return self.cursor.fetchall()
+        try:
+            self.cursor.execute("PRAGMA table_info(findings)")
+            cols = {row[1] for row in self.cursor.fetchall()}
+            if "details" in cols:
+                self.cursor.execute(
+                    "SELECT target, vulnerability, details, severity, cvss_score "
+                    "FROM findings WHERE session_id = ? ORDER BY id",
+                    (sid,),
+                )
+                return self.cursor.fetchall()
+            elif "raw_data" in cols:
+                return self.get_all_findings()
+            return []
+        except Exception:
+            return []
 
     def get_session_context(self, target: str) -> str:
         """Return vector-memory context for a target (for Planner injection)."""
