@@ -1,42 +1,82 @@
-import subprocess
 import logging
+import os
+import subprocess
+from typing import Optional, List, Dict, Any
 
-def run_cli_tool(command: list[str], timeout: int = 300, auth_metadata: dict = None) -> str:
+logger = logging.getLogger(__name__)
+
+
+def run_cli_tool(
+    command: List[str],
+    timeout: int = 300,
+    auth_metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Executes a CLI tool safely with timeout, auth injection, and smart truncation.
+    """
+    # Inject auth headers/cookies if provided
+    if auth_metadata:
+        for key, val in auth_metadata.items():
+            if len(command) > 0 and ("httpx" in command[0] or "curl" in command[0]):
+                command.extend(["-H", f"{key}: {val}"])
+            elif len(command) > 0 and "sqlmap" in command[0]:
+                if key.lower() == "cookie":
+                    command.extend(["--cookie", str(val)])
+                else:
+                    command.extend(["--headers", f"{key}: {val}"])
+
+    logger.info("Running command: %s (timeout=%ds)", " ".join(command), timeout)
+
+    proc: Optional[subprocess.Popen] = None
     try:
-        # Inject auth headers/cookies if provided (implementation varies per tool, 
-        # but runner provides the logic for common patterns)
-        if auth_metadata:
-            for key, val in auth_metadata.items():
-                if "httpx" in command[0] or "curl" in command[0]:
-                    command.extend(["-H", f"{key}: {val}"])
-                elif "sqlmap" in command[0]:
-                    if key.lower() == "cookie":
-                        command.extend(["--cookie", val])
-                    else:
-                        command.extend(["--headers", f"{key}: {val}"])
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
 
-        logging.info(f"Running command: {' '.join(command)}")
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-        
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        output = stdout
+        output = stdout or ""
         if stderr:
             output += f"\nStderr: {stderr}"
 
-        if len(output) > 5000:
-            # Smart Truncation: Prioritize lines with security keywords
-            keywords = ["vulnerability", "critical", "[+]", "finding", "exposed", "error", "warning"]
+        # Preserve rich tool outputs for CleanerAgent (up to 30,000 chars)
+        if len(output) > 30000:
+            keywords = [
+                "vulnerability", "critical", "high", "medium", "low",
+                "[+]", "finding", "exposed", "error", "warning",
+                "open", "cve-", "status: 200", "status: 301", "status: 403",
+            ]
             lines = output.splitlines()
             important_lines = [l for l in lines if any(k in l.lower() for k in keywords)]
-            
-            if len(important_lines) > 20:
-                truncated = "\n".join(important_lines[:50]) + "\n...[TRUNCATED - Showing Important Hits Only]"
+
+            if len(important_lines) > 50:
+                truncated = "\n".join(important_lines[:150]) + "\n...[TRUNCATED - Showing Important Hits Only]"
             else:
-                truncated = output[:2500] + "\n...[TRUNCATED MIDDLE]...\n" + output[-2500:]
-            
+                truncated = output[:15000] + "\n...[TRUNCATED MIDDLE]...\n" + output[-15000:]
+
             return truncated
-            
+
         return output
+
+    except subprocess.TimeoutExpired:
+        if proc:
+            try:
+                proc.kill()
+                proc.communicate()
+            except Exception:
+                pass
+        err_msg = f"Tool execution timed out after {timeout} seconds: {' '.join(command)}"
+        logger.error(err_msg)
+        return f"Error executing tool: {err_msg}"
     except Exception as e:
-        return f"Error executing tool: {e}"
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        err_msg = f"Error executing tool {' '.join(command)}: {e}"
+        logger.error(err_msg)
+        return err_msg
