@@ -50,9 +50,10 @@ class AgentState(TypedDict, total=False):
     session_id: str                                                   # UUID grouping this scan run
     memory_context: str                                               # Injected context from vector memory
 
-    # ── Memory Agent (new) ───────────────────────────────────────────
+    # ── Agent references ─────────────────────────────────────────────
     memory_agent: Any                                                 # MemoryAgent instance
     cleaner_agent: Any                                                # CleanerAgent instance
+    validator_agent: Any                                              # ValidatorAgent instance
 
     # ── Cleaner outputs (new) ────────────────────────────────────────
     clean_result: Dict[str, Any]                                      # Last CleanerAgent output dict
