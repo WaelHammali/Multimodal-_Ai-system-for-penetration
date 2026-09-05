@@ -162,18 +162,8 @@ def main():
 
     logger.info("Selected tools: %s", ", ".join(selected_tools))
 
-    # ── Memory (legacy SQLite + ChromaDB) ──────────────────────
+    # ── Memory (Unified MemoryAgent) ──────────────────────────────
     session_id = str(uuid.uuid4())
-    memory = MemoryStore(
-        db_path=config.memory_db_path,
-        session_id=session_id,
-        vector_enabled=config.memory_vector_enabled,
-        vector_db_path=config.memory_vector_db_path,
-    )
-    logger.info("Memory initialised (SQLite + %s).",
-                "ChromaDB vector" if memory.vector.available else "no vector store")
-
-    # ── MemoryAgent (structured pipeline memory) ───────────────────
     memory_agent: MemoryAgent | None = None
     if config.memory_enabled:
         memory_agent = MemoryAgent(
@@ -184,7 +174,14 @@ def main():
             cache_ttl_seconds=config.memory_cache_ttl,
         )
         session_id = memory_agent.create_session(args.target)
+        memory = memory_agent
         logger.info("MemoryAgent initialised (db: %s).", config.memory_agent_db_path)
+    else:
+        memory = MemoryStore(
+            db_path=config.memory_db_path,
+            session_id=session_id,
+            vector_enabled=False,
+        )
 
     # ── CleanerAgent ───────────────────────────────────────
     cleaner_agent: CleanerAgent | None = None
@@ -299,10 +296,10 @@ def main():
             validation_summary=validation_summary,
         )
 
-    memory.close()
-    if memory_agent:
-        memory_agent.close_session(session_id)
-        memory_agent.close()
+    if memory:
+        if hasattr(memory, "close_session"):
+            memory.close_session(session_id)
+        memory.close()
 
 
 if __name__ == "__main__":

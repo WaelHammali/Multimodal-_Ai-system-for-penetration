@@ -368,6 +368,29 @@ class MemoryAgent:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def log_finding(
+        self,
+        target: str,
+        vulnerability: str,
+        details: Any,
+        severity: str = "Unknown",
+        cvss_score: float = 0.0,
+        validated: bool = False,
+    ) -> str:
+        """Compatibility helper matching MemoryStore signature."""
+        return self.add_finding({
+            "target": target,
+            "finding_type": severity,
+            "title": vulnerability,
+            "raw_data": json.dumps(details) if not isinstance(details, str) else details,
+            "severity": severity,
+            "cvss_score": cvss_score,
+            "validated": validated,
+            "confidence": 90 if validated else 50,
+            "evidence": str(details)[:300],
+            "session_id": getattr(self, "session_id", ""),
+        })
+
     def add_memory(
         self,
         agent: str,
@@ -526,6 +549,21 @@ class MemoryAgent:
             lines.append(
                 f"[{str(row['timestamp'])[:19]}] {row['agent']}: {row['action']} — {detail_str}"
             )
+        return "\n".join(lines)
+
+    def get_session_context(self, target: str, top_k: int = 5) -> str:
+        """
+        Build a textual context block of prior findings/observations related to target
+        for injection into the Planner prompt.
+        """
+        results = self.semantic_search(f"pentest findings for {target}", limit=top_k)
+        if not results:
+            return ""
+        lines = ["## Prior Scan Context (from vector memory)"]
+        for r in results:
+            tool = r.get("action") or r.get("agent") or "?"
+            details = r.get("details", "")
+            lines.append(f"- [{tool}] {str(details)[:200]}")
         return "\n".join(lines)
 
     def semantic_search(
