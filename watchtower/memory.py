@@ -21,6 +21,15 @@ except ImportError:
     _SENTENCE_TRANSFORMERS_AVAILABLE = False
     logger.debug("sentence-transformers not installed — vector search disabled")
 
+# Optional ChromaDB support for scalable HNSW vector search
+try:
+    import chromadb
+
+    _CHROMA_AVAILABLE = True
+except ImportError:
+    _CHROMA_AVAILABLE = False
+    logger.debug("chromadb not installed — ChromaDB vector search disabled")
+
 _DEFAULT_EMBED_MODEL = "all-MiniLM-L6-v2"
 
 _SCHEMA_SQL = """
@@ -34,6 +43,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     total_findings INTEGER DEFAULT 0,
     total_validated INTEGER DEFAULT 0,
     status TEXT DEFAULT 'active'
+);
+
+-- Observations table
+CREATE TABLE IF NOT EXISTS observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    target TEXT,
+    tool TEXT,
+    output TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
 -- Cleaned commands table (with cache)
@@ -116,11 +136,13 @@ class MemoryAgent:
         self,
         db_path: str = "watchtower_memory.db",
         vector_enabled: bool = True,
+        vector_db_path: str = "watchtower_vectordb",
         embed_model: str = _DEFAULT_EMBED_MODEL,
         cache_enabled: bool = True,
         cache_ttl_seconds: int = 86400,
     ) -> None:
         self.db_path = db_path
+        self._vector_enabled = vector_enabled
         self._cache_enabled = cache_enabled
         self._cache_ttl = cache_ttl_seconds
 
@@ -138,6 +160,20 @@ class MemoryAgent:
                     "MemoryAgent: could not load embedding model (%s) — vector search disabled",
                     exc,
                 )
+
+        # ChromaDB HNSW vector index
+        self._chroma_client = None
+        self._chroma_collection = None
+        if vector_enabled and _CHROMA_AVAILABLE:
+            try:
+                self._chroma_client = chromadb.PersistentClient(path=vector_db_path)
+                self._chroma_collection = self._chroma_client.get_or_create_collection(
+                    name="watchtower_memories",
+                    metadata={"hnsw:space": "cosine"},
+                )
+                logger.info("MemoryAgent: ChromaDB HNSW vector store initialised at '%s'", vector_db_path)
+            except Exception as exc:
+                logger.warning("MemoryAgent: ChromaDB init failed: %s", exc)
 
     def _ensure_schema(self) -> None:
         """Create SQLite tables."""
@@ -372,6 +408,23 @@ class MemoryAgent:
                     parent_id,
                 ),
             )
+
+        # Store into ChromaDB for scalable HNSW vector search
+        if self._chroma_collection is not None:
+            try:
+                self._chroma_collection.add(
+                    documents=[f"{agent}: {action} — {details_str[:300]}"],
+                    metadatas=[{
+                        "agent": agent,
+                        "action": action,
+                        "session_id": session_id,
+                        "timestamp": now,
+                    }],
+                    ids=[mem_id],
+                )
+            except Exception as c_exc:
+                logger.debug("MemoryAgent: ChromaDB add failed: %s", c_exc)
+
         return mem_id
 
     def add_reasoning_step(
@@ -390,6 +443,60 @@ class MemoryAgent:
             parent_id=parent_id,
             session_id=session_id,
         )
+
+    def log_observation(
+        self,
+        target: Optional[str],
+        tool: Optional[str],
+        output: Optional[str],
+        clean_result: Optional[Dict[str, Any]] = None,
+        embedding_text: Optional[str] = None,
+    ) -> None:
+        """Log an observation to SQLite and vector store."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO observations (session_id, target, tool, output, created_at) VALUES (?, ?, ?, ?, ?)",
+                (getattr(self, "session_id", ""), target, tool, output, now),
+            )
+
+        if self._chroma_collection is not None:
+            text_to_embed = ""
+            if embedding_text:
+                text_to_embed = embedding_text
+            elif clean_result:
+                summary = clean_result.get("clean_summary", "")
+                structured = clean_result.get("structured_output", "")
+                text_to_embed = f"{summary} {structured}".strip()
+            elif output:
+                text_to_embed = output[:1000]
+
+            if text_to_embed:
+                try:
+                    self._chroma_collection.add(
+                        documents=[text_to_embed],
+                        metadatas=[{"target": target or "", "tool": tool or "", "type": "observation"}],
+                        ids=[str(uuid.uuid4())],
+                    )
+                except Exception as exc:
+                    logger.debug("MemoryAgent: ChromaDB log_observation failed: %s", exc)
+
+    def get_all_observations(self) -> List[Tuple]:
+        """Fetch all observations ordered by created_at."""
+        rows = self._conn.execute("SELECT tool, output FROM observations ORDER BY created_at").fetchall()
+        return [tuple(r) for r in rows]
+
+    def get_all_findings(self) -> List[Tuple]:
+        """Fetch all findings ordered by timestamp."""
+        rows = self._conn.execute("SELECT target, finding_type, raw_data FROM findings ORDER BY timestamp").fetchall()
+        return [tuple(r) for r in rows]
+
+    def get_validated_findings(self) -> List[Tuple]:
+        """Fetch confirmed validated findings."""
+        rows = self._conn.execute(
+            "SELECT target, finding_type, raw_data, confidence FROM findings WHERE validated = 1 ORDER BY confidence DESC"
+        ).fetchall()
+        return [tuple(r) for r in rows]
 
     def get_memory_context(
         self,
@@ -426,7 +533,39 @@ class MemoryAgent:
         query: str,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Semantic RAG search over memory items."""
+        """
+        Semantic RAG search over memory items.
+        Queries ChromaDB HNSW vector index first for speed, with NumPy and keyword fallbacks.
+        """
+        # 1. High-speed ChromaDB HNSW query
+        if self._chroma_collection is not None:
+            try:
+                res = self._chroma_collection.query(
+                    query_texts=[query],
+                    n_results=limit,
+                )
+                docs = res.get("documents", [[]])[0]
+                metas = res.get("metadatas", [[]])[0]
+                distances = res.get("distances", [[]])[0]
+                ids = res.get("ids", [[]])[0]
+
+                results = []
+                for doc_id, doc, meta, dist in zip(ids, docs, metas, distances):
+                    similarity = round(1.0 - float(dist), 4) if dist is not None else 1.0
+                    results.append({
+                        "id": doc_id,
+                        "agent": (meta or {}).get("agent", "Agent"),
+                        "action": (meta or {}).get("action", ""),
+                        "details": doc,
+                        "timestamp": (meta or {}).get("timestamp", ""),
+                        "score": similarity,
+                    })
+                if results:
+                    return results
+            except Exception as c_exc:
+                logger.debug("MemoryAgent: ChromaDB query failed (%s), falling back to embedder", c_exc)
+
+        # 2. Local sentence-transformers + NumPy cosine similarity fallback
         if self._embedder is not None:
             try:
                 import numpy as np
@@ -459,6 +598,7 @@ class MemoryAgent:
             except Exception as exc:
                 logger.warning("MemoryAgent: vector search error (%s), fallback to keyword", exc)
 
+        # 3. Keyword LIKE search fallback
         pattern = f"%{query}%"
         rows = self._conn.execute(
             """
